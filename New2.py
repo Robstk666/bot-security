@@ -13,10 +13,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# REPORTLAB + Montserrat
-from reportlab.pdfbase import pdfmetrics
+
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from reportlab.pdfbase import pdfmetrics
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -30,7 +31,11 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 
 # Регистрируем шрифт Montserrat (должен лежать в папке fonts/Montserrat-Regular.ttf)
-pdfmetrics.registerFont(TTFont('Montserrat', 'fonts/Montserrat-Regular.ttf'))
+base_path = "/Users/Robert/ telegram_bot_project 2025/Bot_2025(1)/fonts"
+font_path = os.path.join(base_path, "Montserrat-Regular.ttf")
+pdfmetrics.registerFont(TTFont("Montserrat", font_path))
+
+
 
 # Создаём папку для фото, если её нет
 os.makedirs("photos", exist_ok=True)
@@ -183,6 +188,8 @@ edit_menu_kb_en = ReplyKeyboardMarkup(
 # --------------------------------------------------
 class FormStates(StatesGroup):
     CHOOSE_LANG = State()
+    WAITING_FIO = State()
+    WAITING_LOGO = State()
     WAITING_PHOTO_34 = State()
     WAITING_PHOTO_FULL = State()
     WAITING_ADD_OR_FINISH = State()
@@ -234,9 +241,73 @@ async def form_russian(message: Message, state: FSMContext):
     })
     await message.answer(
         "Вы выбрали анкету на русском.\n"
-        "Пожалуйста, отправьте фотографию (как на паспорт) — 3×4.",
-        reply_markup=back_to_lang_kb
+        "Пожалуйста, введите ваше Ф.И.О. (Фамилия, Имя, Отчество):",
+        reply_markup=ReplyKeyboardRemove()
     )
+    await state.set_state(FormStates.WAITING_FIO)
+
+@router.message(FormStates.WAITING_FIO)
+async def receive_fio(message: Message, state: FSMContext):
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    if lang == "ru":
+        await state.update_data(fio=message.text.strip())
+        await message.answer(
+            "Спасибо! Теперь загрузите логотип вашей компании (или нажмите Пропустить):",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Пропустить")]],
+                resize_keyboard=True
+            )
+        )
+    else:
+        await state.update_data(fio=message.text.strip())
+        await message.answer(
+            "Thank you! Now upload your company logo (or press Skip):",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Skip")]],
+                resize_keyboard=True
+            )
+        )
+    await state.set_state(FormStates.WAITING_LOGO)
+
+@router.message(FormStates.WAITING_LOGO, F.photo)
+async def receive_logo(message: Message, state: FSMContext):
+    file_id = message.photo[-1].file_id
+    file_info = await bot.get_file(file_id)
+    logo_path = f"photos/logo_{file_id}.jpg"
+    await bot.download_file(file_info.file_path, logo_path)
+    await state.update_data(logo=logo_path)
+
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    if lang == "ru":
+        await message.answer(
+            "Логотип сохранён. Теперь отправьте фотографию (как на паспорт) — 3×4:",
+            reply_markup=back_to_lang_kb
+        )
+    else:
+        await message.answer(
+            "Logo saved. Now send a 3×4 photo (like on a passport):",
+            reply_markup=back_to_lang_kb
+        )
+    await state.set_state(FormStates.WAITING_PHOTO_34)
+
+@router.message(FormStates.WAITING_LOGO, F.text.in_(["Пропустить", "Skip"]))
+async def skip_logo(message: Message, state: FSMContext):
+    await state.update_data(logo=None)
+
+    data = await state.get_data()
+    lang = data.get("lang", "ru")
+    if lang == "ru":
+        await message.answer(
+            "Вы пропустили загрузку логотипа. Теперь отправьте фотографию (как на паспорт) — 3×4:",
+            reply_markup=back_to_lang_kb
+        )
+    else:
+        await message.answer(
+            "You skipped uploading the logo. Now send a 3×4 photo (like on a passport):",
+            reply_markup=back_to_lang_kb
+        )
     await state.set_state(FormStates.WAITING_PHOTO_34)
 
 @router.message(FormStates.CHOOSE_LANG, F.text == "Create form in English")
@@ -253,10 +324,10 @@ async def form_english(message: Message, state: FSMContext):
     })
     await message.answer(
         "You have chosen to fill the form in English.\n"
-        "Please send a 3×4 photo (like on a passport).",
-        reply_markup=back_to_lang_kb
+        "Please enter your full name (First name, Last name):",
+        reply_markup=ReplyKeyboardRemove()
     )
-    await state.set_state(FormStates.WAITING_PHOTO_34)
+    await state.set_state(FormStates.WAITING_FIO)
 
 @router.message(FormStates.CHOOSE_LANG, F.text.in_(["Назад", "Back"]))
 async def choose_lang_back(message: Message, state: FSMContext):
@@ -900,24 +971,79 @@ async def generate_and_send_pdf(message: Message, state: FSMContext):
 
 # --------------------------------------------------
 # Функция генерации PDF (ReportLab)
-# --------------------------------------------------
+# --------------------------------------------------from io import BytesIO
 async def generate_pdf(data: dict) -> BytesIO:
+    language = data.get("lang", "ru")
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        leftMargin=2 * cm, rightMargin=2 * cm,
-        topMargin=2 * cm, bottomMargin=2 * cm
+        leftMargin=2 * 28.35,  # 2 cm
+        rightMargin=2 * 28.35,
+        topMargin=2 * 28.35,
+        bottomMargin=2 * 28.35
     )
 
+    # Dictionary for language-specific content
+    texts = {
+        'ru': {
+            'fio': "Ф.И.О.",
+            'birth_date': "Дата рождения",
+            'registration': "Место регистрации",
+            'residence': "Проживание",
+            'height': "Рост",
+            'weight': "Вес",
+            'marital_status': "Семейное положение",
+            'work_experience': "Опыт работы",
+            'military_service': "Военная служба",
+            'education': "Образование",
+            'additional_info': "Дополнительная информация",
+            'photo_full': "Фотография в полный рост",
+            'no_logo': "<i>Нет логотипа</i>",
+            'no_photo': "<i>Нет фото 3x4</i>",
+            'no_full_photo': "<i>Фото отсутствует</i>",
+            'position': "Должность",
+            'duties': "Обязанности",
+            'subdivision': "Подразделение",
+            'rank': "Звание",
+            'specialty': "Специальность",
+            'basic_info': "Основная информация",  # Добавлен ключ для "Основная информация"
+            'period': "Period"
+        },
+        'en': {
+            'fio': "Full Name",
+            'birth_date': "Date of Birth",
+            'registration': "Place of Registration",
+            'residence': "Residence",
+            'height': "Height",
+            'weight': "Weight",
+            'marital_status': "Marital Status",
+            'work_experience': "Work Experience",
+            'military_service': "Military Service",
+            'education': "Education",
+            'additional_info': "Additional Information",
+            'photo_full': "Full-Body Photo",
+            'no_logo': "<i>No logo</i>",
+            'no_photo': "<i>No 3x4 photo</i>",
+            'no_full_photo': "<i>Photo missing</i>",
+            'position': "Position",
+            'duties': "Duties",
+            'subdivision': "Subdivision",
+            'rank': "Rank",
+            'specialty': "Specialty",
+            'basic_info': "Basic Information",  # Добавлен ключ для "Basic Information"
+            'period': "Period"
+        }
+    }
+
+    # Select texts based on the language
+    lang_text = texts.get(language, texts['ru'])
+
+    # Настройка стилей
     styles = getSampleStyleSheet()
     style_normal = styles['Normal']
     style_normal.fontName = 'Montserrat'
     style_normal.fontSize = 10
-
-    style_title = styles['Title']
-    style_title.fontName = 'Montserrat'
-    style_title.fontSize = 16
 
     style_heading = ParagraphStyle(
         'Heading',
@@ -925,165 +1051,124 @@ async def generate_pdf(data: dict) -> BytesIO:
         fontName='Montserrat',
         fontSize=12,
         spaceBefore=10,
-        spaceAfter=5
+        spaceAfter=5,
+        textColor=colors.black,
     )
 
-    lang = data.get("lang", "ru")
     elements = []
 
-    # Фото 3×4
-    p34 = data.get("photo_3x4")
-    if p34 and os.path.isfile(p34):
-        photo_3x4_img = Image(p34, width=3*cm, height=4*cm)
-    else:
-        photo_3x4_img = Paragraph("<i>No 3x4 photo</i>", style_normal)
+    def add_section_title(title):
+        """Добавляет заголовок секции и линию под ним."""
+        elements.append(Paragraph(title, style_heading))
+        elements.append(Spacer(1, 0.2 * 28.35))
+        elements.append(Table(
+            [[Paragraph("<br/>", style_normal)]],  # Пустая строка для линии
+            colWidths=[doc.width],
+            style=TableStyle([
+                ('LINEABOVE', (0, 0), (-1, 0), 0.5, colors.grey),
+                ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.grey),
+            ])
+        ))
+        elements.append(Spacer(1, 0.2 * 28.35))
+
+    # Шапка документа: Фото + Информация
+    logo = data.get("logo")
+    photo_3x4 = data.get("photo_3x4")
+
+    # Логотип
+    logo_img = Image(logo, width=3 * 28.35, height=3 * 28.35) if logo and os.path.isfile(logo) else Paragraph(lang_text['no_logo'], style_normal)
+
+    # Фото 3x4
+    photo_img = Image(photo_3x4, width=3 * 28.35, height=4 * 28.35) if photo_3x4 and os.path.isfile(photo_3x4) else Paragraph(lang_text['no_photo'], style_normal)
+
+    # Ф.И.О.
+    fio = data.get("fio", "—")
+    fio_paragraph = Paragraph(f"<b>{lang_text['fio']}:</b> {fio}", style_normal)
+
+    # Основная информация
+    binfo = data.get("basic_info", {})
+    basic_info = Paragraph(
+        f"{lang_text['birth_date']}: {binfo.get('birth_date', '—')}<br/>"
+        f"{lang_text['registration']}: {binfo.get('registration', '—')}<br/>"
+        f"{lang_text['residence']}: {binfo.get('residence', '—')}<br/>"
+        f"{lang_text['height']}: {binfo.get('height', '—')} cm<br/>"
+        f"{lang_text['weight']}: {binfo.get('weight', '—')} kg<br/>"
+        f"{lang_text['marital_status']}: {binfo.get('marital', '—')}",
+        style_normal
+    )
+
+    # Таблица для шапки
+    header_table = Table(
+        [[logo_img, fio_paragraph, photo_img]],
+        colWidths=[3.5 * 28.35, 9 * 28.35, 4 * 28.35]
+    )
+    header_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+        ('ALIGN', (2, 0), (2, 0), 'RIGHT'),
+        ('LINEBELOW', (0, -1), (-1, -1), 0.5, colors.grey),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+    ]))
+    elements.append(header_table)
+    elements.append(Spacer(1, 0.5 * 28.35))
+
+    # Базовая информация
+    add_section_title(lang_text['basic_info'])
+    elements.append(basic_info)
+
+    # Опыт работы
+    work_list = data.get("work_experience", [])
+    if work_list:
+        add_section_title(lang_text['work_experience'])
+        for i, work in enumerate(work_list, 1):
+            elements.append(Paragraph(
+                f"{i}. {work.get('employer', '—')} ({work.get('period', '—')})<br/>"
+                f"{lang_text['position']}: {work.get('position', '—')}<br/>"
+                f"{lang_text['duties']}: {work.get('duties', '—')}",
+                style_normal
+            ))
+            elements.append(Spacer(1, 0.2 * 28.35))
+
+    # Военная служба
+    ms = data.get("military_service", {})
+    if ms:
+        add_section_title(lang_text['military_service'])
+        elements.append(Paragraph(
+            f"{lang_text['subdivision']}: {ms.get('subdivision', '—')}<br/>"
+            f"{lang_text['period']}: {ms.get('period', '—')}<br/>"
+            f"{lang_text['rank']}: {ms.get('rank', '—')}",
+            style_normal
+        ))
+
+    # Образование
+    edu_list = data.get("education", [])
+    if edu_list:
+        add_section_title(lang_text['education'])
+        for i, edu in enumerate(edu_list, 1):
+            elements.append(Paragraph(
+                f"{i}. {edu.get('institution', '—')} ({edu.get('period', '—')})<br/>"
+                f"{lang_text['specialty']}: {edu.get('specialty', '—')}",
+                style_normal
+            ))
+            elements.append(Spacer(1, 0.2 * 28.35))
+
+    # Дополнительная информация
+    add_info = data.get("additional_info")
+    if add_info:
+        add_section_title(lang_text['additional_info'])
+        elements.append(Paragraph(add_info, style_normal))
 
     # Фото в полный рост
-    pfull = data.get("photo_full")
-    if pfull and os.path.isfile(pfull):
-        photo_full_img = Image(pfull, width=4*cm, height=6*cm)
+    photo_full = data.get("photo_full")
+    if photo_full and os.path.isfile(photo_full):
+        add_section_title(lang_text['photo_full'])
+        full_photo_img = Image(photo_full, width=7 * 28.35, height=10 * 28.35)
+        elements.append(full_photo_img)
     else:
-        photo_full_img = Paragraph("<i>No full-height photo</i>", style_normal)
+        add_section_title(lang_text['photo_full'])
+        elements.append(Paragraph(lang_text['no_full_photo'], style_normal))
 
-    if lang == "ru":
-        elements.append(Paragraph("Анкета", style_title))
-        elements.append(Spacer(1, 0.5*cm))
-
-        elements.append(Paragraph("Фото 3×4:", style_heading))
-        elements.append(photo_3x4_img)
-        elements.append(Spacer(1, 0.5*cm))
-
-        elements.append(Paragraph("Фото в полный рост:", style_heading))
-        elements.append(photo_full_img)
-        elements.append(Spacer(1, 0.5*cm))
-
-        # Основная инфа
-        binfo = data.get("basic_info", {})
-        elements.append(Paragraph("Основная информация:", style_heading))
-        txt_bi = (
-            f"Дата рождения: {binfo.get('birth_date','')}\n"
-            f"Регистрация: {binfo.get('registration','')}\n"
-            f"Проживание: {binfo.get('residence','')}\n"
-            f"Рост: {binfo.get('height','')}\n"
-            f"Вес: {binfo.get('weight','')}\n"
-            f"Семейное положение: {binfo.get('marital','')}\n"
-        )
-        elements.append(Paragraph(txt_bi.replace("\n", "<br/>"), style_normal))
-
-        # Опыт работы
-        work_list = data.get("work_experience", [])
-        if work_list:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Опыт работы:", style_heading))
-            for i, wexp in enumerate(work_list, 1):
-                wtxt = (
-                    f"{i}. {wexp['employer']} / {wexp['city']} / {wexp['period']} / "
-                    f"{wexp['position']} / {wexp['duties']}"
-                )
-                elements.append(Paragraph(wtxt, style_normal))
-
-        # Военная служба
-        ms = data.get("military_service")
-        if ms:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Военная служба:", style_heading))
-            ms_txt = (
-                f"Подразделение: {ms['subdivision']}, "
-                f"Период: {ms['period']}, "
-                f"Звание: {ms['rank']}, "
-                f"Примечания: {ms['notes']}"
-            )
-            elements.append(Paragraph(ms_txt, style_normal))
-
-        # Образование
-        edu_list = data.get("education", [])
-        if edu_list:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Образование:", style_heading))
-            for i, e in enumerate(edu_list, 1):
-                etxt = (
-                    f"{i}. {e['institution']} / {e['period']} / "
-                    f"{e['type']} / {e['specialty']}"
-                )
-                elements.append(Paragraph(etxt, style_normal))
-
-        # Доп.инфо
-        add_info = data.get("additional_info", "")
-        if add_info:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Дополнительная информация:", style_heading))
-            elements.append(Paragraph(add_info, style_normal))
-
-    else:
-        # English
-        elements.append(Paragraph("Form", style_title))
-        elements.append(Spacer(1, 0.5*cm))
-
-        elements.append(Paragraph("3×4 photo:", style_heading))
-        elements.append(photo_3x4_img)
-        elements.append(Spacer(1, 0.5*cm))
-
-        elements.append(Paragraph("Full-height photo:", style_heading))
-        elements.append(photo_full_img)
-        elements.append(Spacer(1, 0.5*cm))
-
-        # Basic info
-        binfo = data.get("basic_info", {})
-        elements.append(Paragraph("Basic info:", style_heading))
-        txt_bi = (
-            f"Birth date: {binfo.get('birth_date','')}\n"
-            f"Registration: {binfo.get('registration','')}\n"
-            f"Residence: {binfo.get('residence','')}\n"
-            f"Height: {binfo.get('height','')}\n"
-            f"Weight: {binfo.get('weight','')}\n"
-            f"Marital status: {binfo.get('marital','')}\n"
-        )
-        elements.append(Paragraph(txt_bi.replace("\n", "<br/>"), style_normal))
-
-        # Work experience
-        work_list = data.get("work_experience", [])
-        if work_list:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Work experience:", style_heading))
-            for i, wexp in enumerate(work_list, 1):
-                wtxt = (
-                    f"{i}. {wexp['employer']} / {wexp['city']} / {wexp['period']} / "
-                    f"{wexp['position']} / {wexp['duties']}"
-                )
-                elements.append(Paragraph(wtxt, style_normal))
-
-        # Military
-        ms = data.get("military_service")
-        if ms:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Military service:", style_heading))
-            ms_txt = (
-                f"Subdivision: {ms['subdivision']}, "
-                f"Period: {ms['period']}, "
-                f"Rank: {ms['rank']}, "
-                f"Notes: {ms['notes']}"
-            )
-            elements.append(Paragraph(ms_txt, style_normal))
-
-        # Education
-        edu_list = data.get("education", [])
-        if edu_list:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Education:", style_heading))
-            for i, e in enumerate(edu_list, 1):
-                etxt = (
-                    f"{i}. {e['institution']} / {e['period']} / "
-                    f"{e['type']} / {e['specialty']}"
-                )
-                elements.append(Paragraph(etxt, style_normal))
-
-        # Additional info
-        add_info = data.get("additional_info", "")
-        if add_info:
-            elements.append(Spacer(1, 0.5*cm))
-            elements.append(Paragraph("Additional info:", style_heading))
-            elements.append(Paragraph(add_info, style_normal))
-
+    # Генерация PDF
     doc.build(elements)
     buffer.seek(0)
     return buffer
@@ -1156,20 +1241,20 @@ async def edit_which_block(message: Message, state: FSMContext):
         if lang == "ru":
             q = (
                 "Укажите данные об опыте работы (5 строк) или «Пропустить»:\n"
-                "1) Работодатель\n"
-                "2) Город\n"
-                "3) Период\n"
-                "4) Должность\n"
-                "5) Обязанности\n"
+                "1) Работодатель \n"
+                "2) Город \n"
+                "3) Период \n"
+                "4) Должность \n"
+                "5) Обязанности \n"
             )
         else:
             q = (
-                "Enter work experience (5 lines) or 'Skip':\n"
-                "1) Employer\n"
-                "2) City\n"
-                "3) Period\n"
-                "4) Position\n"
-                "5) Duties\n"
+                "Enter work experience (5 lines) or 'Skip': \n"
+                "1) Employer \n"
+                "2) City \n"
+                "3) Period \n"
+                "4) Position \n"
+                "5) Duties \n"
             )
         await message.answer(q)
         await state.set_state(FormStates.WAITING_WORK)
